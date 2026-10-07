@@ -476,3 +476,32 @@ async def test_runtime_routing_strategy_args_update_is_a_noop_without_a_selector
 
     assert router.routing_strategy_args == {"ttl": 5}
     assert await _pick_streaming(router) == FAST_TTFT_ID
+
+
+def test_second_router_in_one_process_records_its_own_latency(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(litellm, "callbacks", [])
+    _latency_router({})
+    second = _latency_router({})
+    latencies_by_deployment = {FAST_TTFT_ID: 1, SLOW_TTFT_ID: 3}
+
+    for deployment_id, seconds in latencies_by_deployment.items():
+        kwargs = {
+            "litellm_params": {
+                "metadata": {"model_group": MODEL_GROUP, "deployment": f"openai/{MODEL_GROUP}"},
+                "model_info": {"id": deployment_id},
+            }
+        }
+        for callback in litellm.callbacks:
+            if isinstance(callback, LowestLatencyLoggingHandler):
+                callback.log_success_event(
+                    response_obj=_chat_response(completion_tokens=0),
+                    kwargs=kwargs,
+                    start_time=datetime(2026, 1, 1, 12, 0, 0),
+                    end_time=datetime(2026, 1, 1, 12, 0, seconds),
+                )
+
+    recorded = second.cache.get_cache(key=f"{MODEL_GROUP}_map") or {}
+    assert {
+        deployment_id: recorded.get(deployment_id, {}).get("latency") for deployment_id in latencies_by_deployment
+    } == {deployment_id: [pytest.approx(float(seconds))] for deployment_id, seconds in latencies_by_deployment.items()}
+    assert second.get_available_deployment(model=MODEL_GROUP, messages=[])["model_info"]["id"] == FAST_TTFT_ID
